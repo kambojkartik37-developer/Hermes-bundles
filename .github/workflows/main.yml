@@ -1,4 +1,4 @@
-name: Extract Hermes JavaScript Bundle
+name: Split Large Decompiled JavaScript for GitHub Viewing
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  extract:
+  split-source:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -20,19 +20,60 @@ jobs:
       - name: Extract ZIP
         run: |
           set -e
-          mkdir -p decompiled
-          unzip -o netmirror-decompiled-js.zip -d decompiled
-          echo "Extracted files:"
-          find decompiled -maxdepth 3 -type f -print
+          mkdir -p work decompiled
+          unzip -o netmirror-decompiled-js.zip -d work
+          SOURCE="work/index.decompiled.js"
+          if [ ! -f "$SOURCE" ]; then
+            SOURCE="$(find work -type f -name '*.js' | head -n 1)"
+          fi
+          test -n "$SOURCE"
+          test -f "$SOURCE"
+          echo "Source: $SOURCE"
+          wc -lc "$SOURCE"
 
-      - name: Commit extracted source
+      - name: Split source into smaller viewable files
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+
+          root = Path(".")
+          work = root / "work"
+          matches = list(work.rglob("*.js"))
+          if not matches:
+              raise SystemExit("No .js file found in ZIP")
+          source = matches[0]
+          out = root / "decompiled"
+          out.mkdir(exist_ok=True)
+          for old in out.glob("index.decompiled.part-*.js"):
+              old.unlink()
+          data = source.read_bytes()
+          limit = 300_000
+          chunks = []
+          current = bytearray()
+          for line in data.splitlines(keepends=True):
+              if current and len(current) + len(line) > limit:
+                  chunks.append(bytes(current))
+                  current.clear()
+              current.extend(line)
+          if current:
+              chunks.append(bytes(current))
+          for i, chunk in enumerate(chunks, 1):
+              (out / f"index.decompiled.part-{i:03d}.js").write_bytes(chunk)
+          print(f"Created {len(chunks)} parts")
+          for p in sorted(out.glob("index.decompiled.part-*.js")):
+              print(f"{p}: {p.stat().st_size} bytes")
+          PY
+          rm -f decompiled/index.decompiled.js
+
+      - name: Commit viewable source parts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add decompiled
+          git add -A decompiled
           if git diff --cached --quiet; then
-            echo "No extracted-file changes to commit."
+            echo "No changes to commit."
           else
-            git commit -m "Extract decompiled Hermes JavaScript source"
+            git commit -m "Split decompiled JavaScript into viewable parts"
             git push
           fi
